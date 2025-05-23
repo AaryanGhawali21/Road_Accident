@@ -1,0 +1,680 @@
+import streamlit as st    #For Creating a UI
+import pandas as pd       #For Data Analysis and Visualization
+import numpy as np        #For Numerical Operation
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder  # Encodes categorical data
+from sklearn.metrics import accuracy_score
+import plotly.express as px  # Encodes/decodes binary data (e.g., for file downloads)
+import plotly.graph_objects as go # Low-level customizable plots
+import base64
+from datetime import datetime
+import io
+# Add PDF generation libraries
+import tempfile   # Creates temporary files/directories
+import os
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+
+# ------------------- Streamlit Config -------------------
+st.set_page_config(page_title="Accident Severity Predictor", page_icon="🚦", layout="centered")
+
+# ------------------- Data Processing and Cleaning -------------------
+def load_and_clean_data():
+    # Load data
+    df = pd.read_csv("synthetic_accidents.csv")
+    
+    # Data Cleaning
+    # 1. Handle missing values (if any)
+    df.dropna(inplace=True)
+    
+    # 2. Remove duplicates
+    df.drop_duplicates(inplace=True)
+    
+    # 3. Feature Engineering
+    # Create age bins if not already done
+    if 'driver_age' not in df.columns and 'age' in df.columns:
+        bins = [0, 18, 30, 50, 100]
+        labels = ['Under 18', '18-30', '31-50', 'Over 50']
+        df['driver_age'] = pd.cut(df['age'], bins=bins, labels=labels)
+        df.drop('age', axis=1, inplace=True)
+    
+    # 4. Ensure categorical columns are properly formatted
+    categorical_cols = ['time', 'weather', 'road_condition', 'speed', 'driver_age', 
+                       'driver_experience', 'collision_type', 'vehicle_type', 'safety_features']
+    
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = df[col].astype('category').cat.as_ordered()
+    
+    # 5. Ensure target variable is properly encoded
+    severity_order = ['Slight Injury', 'Serious Injury', 'Fatal Injury']
+    df['severity'] = pd.Categorical(df['severity'], categories=severity_order, ordered=True)
+    
+    return df
+
+# ------------------- Load and Train Model -------------------
+@st.cache_resource
+def load_model():
+    # Load and clean data
+    df = load_and_clean_data()
+    
+    # Prepare features and target
+    X = df.drop("severity", axis=1)
+    y = df["severity"]
+    
+    # Encoding categorical variables
+    encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    X_encoded = encoder.fit_transform(X)
+    
+    # Split data with stratification
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_encoded, y, 
+        test_size=0.15,  # Reduced from 0.2 to give more training data
+        random_state=42,
+        stratify=y  # Maintain class distribution
+    )
+    
+    #RandomForestClassifier Implemented
+    model = RandomForestClassifier(
+        n_estimators=350,  # Increased from 300
+        max_depth=15,      # Increased from 12
+        min_samples_split=3,  # Reduced from 4
+        min_samples_leaf=1,
+        max_features='sqrt',
+        bootstrap=True,
+        random_state=42,
+        class_weight='balanced',  # Handle class imbalance
+        n_jobs=-1,  # Use all cores
+        max_samples=0.8,  # Use 80% of samples for each tree
+        warm_start=True  # For potential future training
+    )
+    
+    # Train model
+    model.fit(X_train, y_train)
+    
+    # Evaluate model
+    train_accuracy = accuracy_score(y_train, model.predict(X_train))
+    test_accuracy = accuracy_score(y_test, model.predict(X_test))
+    
+    return model, encoder, df, train_accuracy, test_accuracy
+
+# ------------------- Cause Analysis and Recommendations -------------------
+def analyze_causes(input_data):
+    """Analyze potential causes based on input data"""
+    causes = []
+    
+    # Weather-related causes
+    if input_data["weather"] in ["Rain", "Snow", "Fog"]:
+        causes.append("Adverse weather conditions (reduced visibility and traction)")
+    
+    # Road condition causes
+    if input_data["road_condition"] in ["Wet", "Snowy/Icy", "Damaged"]:
+        causes.append(f"Poor road conditions ({input_data['road_condition']} surface)")
+    
+    # Speed-related causes
+    if input_data["speed"] == "Above Speed Limit":
+        causes.append("Excessive speed (reduced reaction time)")
+    elif input_data["speed"] == "Below Speed Limit":
+        causes.append("Potential speed differential with other vehicles")
+    
+    # Driver-related causes
+    if input_data["driver_experience"] in ["No License", "Less than 1 year"]:
+        causes.append(f"Driver inexperience ({input_data['driver_experience']})")
+    
+    # Time-related causes
+    if input_data["time"] in ["Night", "Evening"]:
+        causes.append(f"Limited visibility ({input_data['time']} conditions)")
+    elif input_data["time"] == "Morning":
+        causes.append("Potential driver fatigue during morning commute")
+    
+    # Vehicle-related causes
+    if input_data["vehicle_type"] == "Motorcycle":
+        causes.append("Vulnerable vehicle type (motorcycles offer less protection)")
+    elif input_data["vehicle_type"] == "Truck":
+        causes.append("Large vehicle (longer stopping distance, larger blind spots)")
+        
+    # Safety feature causes
+    if input_data["safety_features"] == "Basic":
+        causes.append("Limited safety precautions (reduced crash protection)")
+    elif input_data["safety_features"] == "Advanced":
+        causes.append("Mitigated by advanced safety precautions")
+    
+    # Collision type causes
+    if input_data["collision_type"] in ["Vehicle to Pedestrian", "Rollover"]:
+        causes.append(f"High-risk collision type ({input_data['collision_type']})")
+    elif input_data["collision_type"] == "Vehicle to Vehicle":
+        causes.append("Multi-vehicle collision potential")
+    
+    # Age-related factors
+    if input_data["driver_age"] == "Under 18":
+        causes.append("Young driver (higher risk-taking behavior)")
+    elif input_data["driver_age"] == "Over 50":
+        causes.append("Older driver (potential reduced reaction time)")
+    
+    # Add a default cause if none identified
+    if not causes:
+        causes.append("Multiple contributing factors (complex interaction of conditions)")
+    
+    return causes
+
+def generate_recommendations(causes, severity):
+    """Generate recommendations based on causes and severity"""
+    recommendations = []
+    
+    for cause in causes:
+        if "weather" in cause.lower():
+            recommendations.append("Install weather-responsive speed limit signs and improve road drainage systems")
+            if "Fog" in cause:
+                recommendations.append("Implement fog detection systems with automatic warning lights")
+        
+        if "road" in cause.lower():
+            if "Snowy/Icy" in cause:
+                recommendations.append("Increase winter road maintenance including timely salting and plowing")
+            else:
+                recommendations.append("Schedule immediate road surface repairs and improve skid resistance")
+        
+        if "speed" in cause.lower():
+            recommendations.append("Implement variable speed limit systems based on traffic conditions")
+            recommendations.append("Install speed cameras with automated enforcement in high-risk areas")
+        
+        if "inexperience" in cause.lower():
+            recommendations.append("Develop graduated driver licensing programs with mandatory training hours")
+            recommendations.append("Implement novice driver restrictions (night driving limits, passenger limits)")
+        
+        if "visibility" in cause.lower():
+            recommendations.append("Upgrade street lighting to LED systems with uniform illumination")
+            recommendations.append("Install retroreflective signage and road markings for better night visibility")
+            
+        if "vehicle" in cause.lower():
+            if "motorcycle" in cause.lower():
+                recommendations.append("Create separated motorcycle lanes on high-speed roads")
+                recommendations.append("Implement mandatory motorcycle safety courses")
+            elif "truck" in cause.lower():
+                recommendations.append("Improve truck route planning and install truck rollover warning systems")
+            
+        if "safety precautions" in cause.lower():
+            recommendations.append("Launch public awareness campaigns about vehicle safety ratings")
+            recommendations.append("Offer tax incentives for purchasing vehicles with advanced safety precautions")
+            
+        if "collision" in cause.lower():
+            if "Pedestrian" in cause:
+                recommendations.append("Install pedestrian refuge islands and raised crosswalks")
+                recommendations.append("Implement pedestrian detection systems at high-risk crossings")
+            elif "Rollover" in cause:
+                recommendations.append("Improve curve delineation and install rollover warning systems")
+    
+    # Add severity-based recommendations
+    if severity == "Fatal Injury":
+        recommendations.append("Redesign road section with median barriers and clear recovery zones")
+        recommendations.append("Implement automated speed enforcement with zero-tolerance policy")
+    elif severity == "Serious Injury":
+        recommendations.append("Install intelligent intersection systems with collision warnings")
+        recommendations.append("Create dedicated emergency response corridors for faster medical access")
+    
+    # Ensure we have at least one recommendation
+    if not recommendations:
+        recommendations.append("Conduct comprehensive road safety audit with traffic psychology experts")
+    
+    return list(set(recommendations))[:10]  # Limit to 10 unique recommendations
+
+def generate_driver_recommendations(input_data, severity):
+    """Generate safety recommendations for the driver based on input data and severity"""
+    recommendations = []
+    
+    # Weather-based recommendations
+    if input_data["weather"] in ["Rain", "Snow", "Fog"]:
+        recommendations.append(f"In {input_data['weather'].lower()} conditions: Reduce speed by 20-30%, increase following distance to 5+ seconds")
+        if input_data["weather"] == "Fog":
+            recommendations.append("Use low-beam headlights and fog lights if equipped - never use high beams")
+        elif input_data["weather"] == "Snow":
+            recommendations.append("Carry winter emergency kit (blankets, shovel, sand, flashlight)")
+    
+    # Road condition recommendations
+    if input_data["road_condition"] in ["Wet", "Snowy/Icy", "Damaged"]:
+        recommendations.append(f"On {input_data['road_condition'].lower()} roads: Avoid sudden maneuvers, test brakes gently when safe")
+        if input_data["road_condition"] == "Snowy/Icy":
+            recommendations.append("Consider winter tires with studs or chains in extreme conditions")
+    
+    # Speed-related recommendations
+    if input_data["speed"] == "Above Speed Limit":
+        recommendations.append("Use speed limit assist technology if available, or set manual reminders")
+        recommendations.append("Plan trips with extra time to avoid speed pressure")
+    elif input_data["speed"] == "Below Speed Limit":
+        recommendations.append("When driving slower than traffic, use right lane and hazard lights if necessary")
+    
+    # Driver experience recommendations
+    if input_data["driver_experience"] in ["No License", "Less than 1 year"]:
+        recommendations.append("Practice defensive driving techniques in controlled environments")
+        recommendations.append("Use 'new driver' magnets to alert other motorists")
+    
+    # Time-related recommendations
+    if input_data["time"] in ["Night", "Evening"]:
+        recommendations.append("Night driving: Clean windshield inside/out, adjust mirrors to reduce glare")
+        recommendations.append("Take 15-minute breaks every 90 minutes during night trips")
+    
+    # Vehicle-related recommendations
+    if input_data["vehicle_type"] == "Motorcycle":
+        recommendations.append("Wear full protective gear (DOT/ECE helmet, armored jacket, gloves, boots)")
+        recommendations.append("Assume you're invisible to other drivers - ride defensively")
+    elif input_data["vehicle_type"] == "Truck":
+        recommendations.append("Perform thorough pre-trip inspection, especially brakes and tires")
+    
+    # Safety feature recommendations
+    if input_data["safety_features"] == "Basic":
+        recommendations.append("Consider adding aftermarket safety tech (blind spot monitors, dash cams)")
+    elif input_data["safety_features"] in ["Standard", "Advanced"]:
+        recommendations.append("Regularly review and practice using all available safety precautions")
+    
+    # Age-specific recommendations
+    if input_data["driver_age"] == "Under 18":
+        recommendations.append("Limit night driving and passenger numbers as recommended by safety experts")
+    elif input_data["driver_age"] == "Over 50":
+        recommendations.append("Schedule regular vision and reaction time checks with medical professionals")
+    
+    # Severity-based recommendations
+    if severity == "Fatal Injury":
+        recommendations.append("Consider alternative transportation for high-risk conditions/situations")
+        recommendations.append("Review emergency procedures (first aid, crash response) with all passengers")
+    
+    # General recommendations
+    recommendations.append("Always perform 360-degree visual check before moving vehicle")
+    recommendations.append("Keep vehicle maintenance records and address recalls immediately")
+    
+    # Ensure we have sufficient recommendations
+    if len(recommendations) < 8:
+        recommendations.append("Review insurance coverage for adequate protection")
+        recommendations.append("Program emergency contacts into phone for quick access")
+    
+    return list(set(recommendations))[:12]  # Limit to 12 unique recommendations
+
+def calculate_risk_score(severity, probabilities):
+    """Calculate risk score based on severity and probabilities"""
+    # Weighted score considering all probabilities
+    severity_weights = {
+        "Fatal Injury": 1.0,
+        "Serious Injury": 0.7,
+        "Slight Injury": 0.3
+    }
+    
+    weighted_score = sum(prob * severity_weights[sev] for sev, prob in probabilities.items())
+    base_score = weighted_score * 100
+    
+    # Adjust based on highest severity probability
+    if severity == "Fatal Injury":
+        base_score = min(base_score * 1.3, 100)
+    elif severity == "Serious Injury":
+        base_score = min(base_score * 1.1, 95)
+    
+    return min(round(base_score), 100)  # Cap at 100
+
+# ------------------- PDF Report Generation -------------------
+def generate_report(input_data, prediction, prob_dict, risk_score, causes, recommendations, driver_recommendations):
+    """Generate a downloadable report as PDF"""
+    # Create a temporary file to store the PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+        temp_filename = tmp_file.name
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(
+        temp_filename,
+        pagesize=letter,
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=72
+    )
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Styles
+    styles = getSampleStyleSheet()
+    title_style = styles['Heading1']
+    title_style.alignment = 1  # Center
+    subtitle_style = styles['Heading2']
+    normal_style = styles['Normal']
+    
+    # Risk color
+    risk_color = colors.green
+    if risk_score >= 75:
+        risk_color = colors.red
+        risk_text = "Critical Risk"
+    elif risk_score >= 50:
+        risk_color = colors.orange
+        risk_text = "Moderate Risk"
+    else:
+        risk_text = "Low Risk"
+    
+    # Title
+    elements.append(Paragraph("Comprehensive Road Accident Analysis Report", title_style))
+    elements.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %H:%M')}", 
+                            ParagraphStyle('DateStyle', parent=styles['Normal'], alignment=1)))
+    elements.append(Spacer(1, 12))
+    
+    # Accident Parameters
+    elements.append(Paragraph("Accident Scenario Parameters", subtitle_style))
+    
+    # Create a table for parameters
+    data = [
+        ["Parameter", "Value", "Risk Factor"],
+        ["Time of Day", input_data["time"], 
+         "High" if input_data["time"] in ["Night", "Evening"] else "Medium" if input_data["time"] == "Morning" else "Low"],
+        ["Weather", input_data["weather"], 
+         "High" if input_data["weather"] in ["Rain", "Snow", "Fog"] else "Low"],
+        ["Road Condition", input_data["road_condition"], 
+         "High" if input_data["road_condition"] in ["Wet", "Snowy/Icy", "Damaged"] else "Low"],
+        ["Vehicle Speed", input_data["speed"], 
+         "High" if input_data["speed"] == "Above Speed Limit" else "Medium" if input_data["speed"] == "At Speed Limit" else "Low"],
+        ["Driver Age", input_data["driver_age"], 
+         "High" if input_data["driver_age"] in ["Under 18", "Over 50"] else "Medium" if input_data["driver_age"] == "18-30" else "Low"],
+        ["Driver Experience", input_data["driver_experience"], 
+         "High" if input_data["driver_experience"] in ["No License", "Less than 1 year"] else "Low"],
+        ["Collision Type", input_data["collision_type"], 
+         "High" if input_data["collision_type"] in ["Vehicle to Pedestrian", "Rollover"] else "Medium" if input_data["collision_type"] == "Vehicle to Vehicle" else "Low"],
+        ["Vehicle Type", input_data["vehicle_type"], 
+         "High" if input_data["vehicle_type"] in ["Motorcycle", "Truck"] else "Low"],
+        ["Safety Precautions", input_data["safety_features"], 
+         "High" if input_data["safety_features"] == "Basic" else "Medium" if input_data["safety_features"] == "Standard" else "Low"]
+    ]
+    
+    # Create table
+    param_table = Table(data, colWidths=[1.5*inch, 1.5*inch, 1*inch])
+    param_table.setStyle(TableStyle([
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('BACKGROUND', (2, 1), (2, -1), colors.whitesmoke),
+        ('TEXTCOLOR', (2, 1), (2, -1), 
+         lambda r, c: colors.red if data[r][2] == "High" else 
+                     colors.orange if data[r][2] == "Medium" else colors.green),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+    ]))
+    elements.append(param_table)
+    elements.append(Spacer(1, 12))
+    
+    # Prediction Results
+    elements.append(Paragraph("Prediction Results", subtitle_style))
+    elements.append(Paragraph(f"<b>Predicted Severity:</b> {prediction}", normal_style))
+    elements.append(Paragraph(f"<b>Confidence Level:</b> {prob_dict[prediction]*100:.1f}%", normal_style))
+    
+    # Probability Breakdown
+    elements.append(Paragraph("Probability Breakdown:", styles['Heading4']))
+    prob_data = [["Severity Level", "Probability", "Risk Level"]]
+    for severity, prob in prob_dict.items():
+        risk_level = "High" if severity == "Fatal Injury" else "Medium" if severity == "Serious Injury" else "Low"
+        prob_data.append([severity, f"{prob*100:.1f}%", risk_level])
+    
+    prob_table = Table(prob_data, colWidths=[2*inch, 1.5*inch, 1.5*inch])
+    prob_table.setStyle(TableStyle([
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('TEXTCOLOR', (2, 1), (2, -1), 
+         lambda r, c: colors.red if prob_data[r][2] == "High" else 
+                     colors.orange if prob_data[r][2] == "Medium" else colors.green),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+    ]))
+    elements.append(prob_table)
+    elements.append(Spacer(1, 12))
+    
+    # Risk Assessment
+    elements.append(Paragraph("Risk Assessment:", styles['Heading4']))
+    risk_style = ParagraphStyle(
+        'RiskStyle', 
+        parent=normal_style,
+        textColor=risk_color,
+        fontName='Helvetica-Bold',
+        fontSize=14,
+        alignment=1
+    )
+    elements.append(Paragraph(f"<b>Comprehensive Risk Score:</b> {risk_score}/100 ({risk_text})", risk_style))
+    
+    # Add risk meter image
+    try:
+        # Create a simple risk meter visualization
+        from reportlab.graphics.shapes import Drawing, Rect
+        from reportlab.graphics.charts.barcharts import HorizontalBarChart
+        
+        drawing = Drawing(400, 50)
+        bc = HorizontalBarChart()
+        bc.x = 50
+        bc.y = 10
+        bc.height = 20
+        bc.width = 300
+        bc.data = [[risk_score]]
+        bc.valueAxis.valueMin = 0
+        bc.valueAxis.valueMax = 100
+        bc.bars[0].fillColor = risk_color
+        bc.bars[0].strokeColor = colors.black
+        drawing.add(bc)
+        
+        # Add risk zones
+        drawing.add(Rect(50, 30, 75, 5, fillColor=colors.green, strokeColor=colors.black))
+        drawing.add(Rect(125, 30, 75, 5, fillColor=colors.orange, strokeColor=colors.black))
+        drawing.add(Rect(200, 30, 75, 5, fillColor=colors.red, strokeColor=colors.black))
+        
+        elements.append(drawing)
+    except:
+        pass
+    
+    elements.append(Spacer(1, 12))
+    
+    # Accident Cause Analysis
+    elements.append(Paragraph("Detailed Cause Analysis", subtitle_style))
+    for cause in causes:
+        elements.append(Paragraph(f"• {cause}", normal_style))
+    elements.append(Spacer(1, 12))
+    
+    # Recommendations for Road Authorities
+    elements.append(Paragraph("Engineering Recommendations for Road Authorities", subtitle_style))
+    for i, rec in enumerate(recommendations, 1):
+        elements.append(Paragraph(f"{i}. {rec}", normal_style))
+    elements.append(Spacer(1, 12))
+    
+    # Safety Recommendations for Driver
+    elements.append(Paragraph("Personalized Safety Recommendations for Driver", subtitle_style))
+    for i, rec in enumerate(driver_recommendations, 1):
+        elements.append(Paragraph(f"{i}. {rec}", normal_style))
+    elements.append(Spacer(1, 12))
+    
+    # Footer
+    footer_style = ParagraphStyle(
+        'Footer', 
+        parent=normal_style,
+        fontSize=8,
+        textColor=colors.darkgrey,
+        alignment=1
+    )
+    elements.append(Paragraph("© 2025 Advanced Road Safety Assessment Tool | This report is generated for safety planning purposes.", footer_style))
+    
+    # Build PDF
+    doc.build(elements)
+    
+    # Read the PDF file
+    with open(temp_filename, "rb") as pdf_file:
+        pdf_bytes = pdf_file.read()
+    
+    # Delete the temporary file
+    os.unlink(temp_filename)
+    
+    # Create download link
+    b64 = base64.b64encode(pdf_bytes).decode()
+    href = f'<a href="data:application/pdf;base64,{b64}" download="accident_analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf">Download Full PDF Report</a>'
+    
+    return href
+
+# Load and train model
+model, encoder, training_data, train_accuracy, test_accuracy = load_model()
+
+# ------------------- UI -------------------
+st.markdown("""
+    <h1 style='text-align: center; color: #bd93f9;'>🚦 Accident Severity Predictor</h1>
+    <hr style='border: 1px solid #bd93f9;'>
+""", unsafe_allow_html=True)
+
+with st.form("prediction_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        time = st.selectbox("Time of Day", ["Morning", "Afternoon", "Evening", "Night"])
+        weather = st.selectbox("Weather", ["Clear", "Rain", "Snow", "Fog"])
+        road_condition = st.selectbox("Road Condition", ["Dry", "Wet", "Snowy/Icy", "Damaged"])
+        speed = st.selectbox("Vehicle Speed", ["Below Speed Limit", "At Speed Limit", "Above Speed Limit"])
+        driver_age = st.selectbox("Driver Age", ["Under 18", "18-30", "31-50", "Over 50"])
+    with col2:
+        driver_experience = st.selectbox("Driver Experience", ["No License", "Less than 1 year", "1-5 years", "Over 5 years"])
+        collision_type = st.selectbox("Collision Type", ["Vehicle to Vehicle", "Vehicle to Pedestrian", "Vehicle to Object", "Rollover", "Other"])
+        vehicle_type = st.selectbox("Vehicle Type", ["Small Car", "Sedan", "SUV", "Truck", "Motorcycle"])
+        safety_features = st.selectbox("Safety Precautions", ["Basic", "Standard", "Advanced"])
+    
+    submit = st.form_submit_button("Predict Severity", type="primary")
+
+if submit:
+    input_df = pd.DataFrame([{
+        "time": time,
+        "weather": weather,
+        "road_condition": road_condition,
+        "speed": speed,
+        "driver_age": driver_age,
+        "driver_experience": driver_experience,
+        "collision_type": collision_type,
+        "vehicle_type": vehicle_type,
+        "safety_features": safety_features
+    }])
+    
+    input_encoded = encoder.transform(input_df)
+    prediction = model.predict(input_encoded)[0]
+    probabilities = model.predict_proba(input_encoded)[0]
+    prob_dict = dict(zip(model.classes_, probabilities))
+    
+    # Calculate risk score
+    risk_score = calculate_risk_score(prediction, prob_dict)
+    
+    # Analyze causes
+    causes = analyze_causes(input_df.iloc[0])
+    
+    # Generate recommendations
+    recommendations = generate_recommendations(causes, prediction)
+    
+    # Generate driver recommendations
+    driver_recommendations = generate_driver_recommendations(input_df.iloc[0], prediction)
+    
+    # Display results in sections
+    st.markdown("## 📊 Prediction Results")
+    
+    # Severity result with color coding
+    severity_color = "#ff5555" if prediction == "Fatal Injury" else "#ffb86c" if prediction == "Serious Injury" else "#50fa7b"
+    st.markdown(f"### Predicted Severity: <span style='color:{severity_color}'>{prediction}</span>", unsafe_allow_html=True)
+    st.progress(int(prob_dict[prediction] * 100))
+    
+    # Display confidence with gauge chart
+    st.markdown("### Prediction Confidence Distribution")
+    conf_df = pd.DataFrame({"Severity": model.classes_, "Probability": [p * 100 for p in probabilities]})
+    fig = px.bar(conf_df, x="Severity", y="Probability", color="Severity", text_auto=True,
+                color_discrete_map={"Fatal Injury": "#ff5555", "Serious Injury": "#ffb86c", "Slight Injury": "#50fa7b"},
+                labels={"Probability": "Confidence (%)"})
+    fig.update_layout(
+        template="plotly_dark",
+        yaxis_title="Confidence (%)",
+        xaxis_title="Severity Level",
+        showlegend=False,
+        margin=dict(l=20, r=20, t=30, b=20)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Risk Score Section with enhanced visualization
+    st.markdown("### 🎯 Comprehensive Risk Assessment")
+    
+    # Create a more detailed risk gauge
+    fig = go.Figure()
+    
+    # Add background sectors
+    fig.add_trace(go.Indicator(
+        mode="gauge+number",
+        value=risk_score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "Risk Score", 'font': {'size': 24}},
+        gauge={
+            'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': severity_color},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [0, 30], 'color': '#50fa7b'},
+                {'range': [30, 70], 'color': '#ffb86c'},
+                {'range': [70, 100], 'color': '#ff5555'}],
+            'threshold': {
+                'line': {'color': "black", 'width': 4},
+                'thickness': 0.75,
+                'value': risk_score}
+        }
+    ))
+    
+    fig.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=60, b=10)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Risk interpretation
+    if risk_score >= 75:
+        st.warning("**Critical Risk:** Immediate safety interventions recommended")
+    elif risk_score >= 50:
+        st.warning("**High Risk:** Significant safety improvements needed")
+    elif risk_score >= 30:
+        st.info("**Moderate Risk:** Some safety improvements recommended")
+    else:
+        st.success("**Low Risk:** Maintain current safety measures")
+    
+    # Cause Analysis Section with expandable details
+    with st.expander("🔍 Detailed Cause Analysis", expanded=True):
+        for cause in causes:
+            st.markdown(f"- {cause}")
+    
+    # Recommendations Section with tabs
+    tab1, tab2 = st.tabs(["🚧 Road Authority Recommendations", "👤 Driver Safety Tips"])
+    
+    with tab1:
+        st.markdown("### Infrastructure and Policy Recommendations")
+        for i, recommendation in enumerate(recommendations, 1):
+            st.markdown(f"{i}. {recommendation}")
+    
+    with tab2:
+        st.markdown("### Personalized Safety Recommendations")
+        for i, recommendation in enumerate(driver_recommendations, 1):
+            st.markdown(f"{i}. {recommendation}")
+    
+    # Report Generation Section
+    st.markdown("## 📄 Generate Comprehensive Report")
+    st.markdown("Download a detailed PDF report with all analysis and recommendations")
+    report_html = generate_report(input_df.iloc[0], prediction, prob_dict, risk_score, causes, recommendations, driver_recommendations)
+    st.markdown(report_html, unsafe_allow_html=True)
+
+# Add footer (completely horizontal)
+st.markdown("""
+<style>
+.footer {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    
+    background-color: #292b36;
+    color: white;
+    text-align: center;
+    padding: 10px 0;
+    z-index: 999;
+}
+</style>
+<div class="footer">
+    <p style='margin: 0; color: #f8f8f2; font-size: 14px;'>
+        © 2025 Advanced Road Safety Assessment Tool | Designed to reduce accident severity through predictive analytics
+    </p>
+</div>
+""", unsafe_allow_html=True)
